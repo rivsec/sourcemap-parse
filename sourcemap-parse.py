@@ -6,7 +6,6 @@ import os
 import json
 import pathlib
 import shutil
-from urllib.parse import urlparse
 
 
 def check_and_clean_output_directory(output_dir):
