@@ -111,3 +111,7 @@ The script handles common errors gracefully:
 
 - Python 3.6+
 - `requests` library (>=2.25.0) 
+
+
+## Thanks to
+Cursor - vibe coding.
