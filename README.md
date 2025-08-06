@@ -1,7 +1,7 @@
 # sourcemap-parse
 
 If a source map is accessible, this script extracts out all of the sources to make them ready for post processing, e.g. in Cursor, grep, or other tools.
-
+<img width="694" height="654" alt="chatgpt logo" src="https://github.com/user-attachments/assets/14bfd944-3f57-4376-8223-e5ba7be7813b" />
 ## Features
 
 - Download sourcemap files from URLs
