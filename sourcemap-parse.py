@@ -103,6 +103,17 @@ def extract_source_files(sourcemap_json, output_dir="extracted_sources"):
         if clean_path.startswith("/"):
             clean_path = clean_path[1:]
 
+        # Sanitize the path to prevent directory traversal
+        # Split the path and filter out any '..' or '.' components
+        path_parts = clean_path.split("/")
+        sanitized_parts = []
+        for part in path_parts:
+            if part not in ["..", "."] and part.strip():
+                sanitized_parts.append(part)
+
+        # Reconstruct the sanitized path
+        clean_path = "/".join(sanitized_parts)
+
         # Create the full file path
         file_path = output_path / clean_path
 
