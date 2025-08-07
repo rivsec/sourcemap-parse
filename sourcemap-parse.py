@@ -6,6 +6,347 @@ import os
 import json
 import pathlib
 import shutil
+import logging
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
+import re
+import asyncio
+import aiohttp
+
+
+def get_script_tags(url, proxy=None):
+    """
+    Get all script tags from the <head> element of a webpage.
+
+    Args:
+        url (str): The URL of the webpage to check
+        proxy (str, optional): Proxy URL (e.g., 'http://proxy:port' or 'socks5://proxy:port')
+
+    Returns:
+        list: List of script tag dictionaries with 'src' and 'tag' keys
+    """
+    try:
+        # Make request to the webpage
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 River Security"
+        }
+
+        # Configure proxy if provided
+        proxies = None
+        if proxy:
+            proxies = {"http": proxy, "https": proxy}
+
+        response = requests.get(url, headers=headers, timeout=10, proxies=proxies)
+        response.raise_for_status()
+
+        # Parse HTML with BeautifulSoup
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        # Find the head element
+        head = soup.find("head")
+        if not head:
+            logging.info("No <head> element found")
+
+        # After checking <head>, also check the rest of the document for <script> tags
+        # that are not in <head> (e.g., in <body> or elsewhere).
+        # We'll collect all <script> tags from the document, then filter out those already in head.
+        all_script_tags = soup.find_all("script")
+
+        scripts = []
+        for script in all_script_tags:
+            src = script.get("src")
+            if src:
+                # Convert relative URLs to absolute URLs
+                if not src.startswith(("http://", "https://")):
+                    src = urljoin(url, src)
+                parsed_url = urlparse(url)
+                parsed_src = urlparse(src)
+                if parsed_url.netloc == parsed_src.netloc:
+                    scripts.append({"src": src, "tag": str(script)})
+                else:
+                    logging.info(f"Skipping script from different domain: {src}")
+
+        return scripts
+
+    except requests.RequestException as e:
+        logging.error(f"Error fetching {url}: {e}")
+        return []
+    except Exception as e:
+        logging.error(f"Error parsing HTML: {e}")
+        return []
+
+
+def setup_logging():
+    import sys
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[logging.StreamHandler(sys.stderr)],
+    )
+
+
+async def check_for_sourcemaps(script_urls, proxy=None):
+    """
+    Async version of check_for_sourcemaps that processes URLs concurrently.
+    """
+    results = {}
+
+    # If proxy is provided, we'll use synchronous requests for better proxy support
+    if proxy:
+        logging.info(
+            "Proxy detected, using synchronous requests for better compatibility"
+        )
+        return check_for_sourcemaps_sync(script_urls, proxy)
+
+    async with aiohttp.ClientSession() as session:
+        # Create tasks for all script URLs
+        tasks = [
+            check_single_script_async(session, script_url, proxy)
+            for script_url in script_urls
+        ]
+
+        # Execute all tasks concurrently
+        completed_tasks = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Process results
+        for script_url, result in zip(script_urls, completed_tasks):
+            if isinstance(result, Exception):
+                logging.error(f"Error processing {script_url}: {result}")
+                results[script_url] = []
+            else:
+                results[script_url] = result
+
+    return results
+
+
+def check_for_sourcemaps_sync(script_urls, proxy=None):
+    """
+    Synchronous fallback for proxy support when aiohttp proxy handling fails.
+    """
+    results = {}
+
+    # Configure proxy if provided
+    proxies = None
+    if proxy:
+        proxies = {"http": proxy, "https": proxy}
+
+    for script_url in script_urls:
+        logging.info(f"Checking: {script_url}")
+        sourcemaps = []
+
+        # Method 1: Check for source map comment in script content
+        try:
+            response = requests.get(script_url, timeout=10, proxies=proxies)
+            if response.status_code == 200:
+                # Look for source map comment
+                sourcemap_comment = find_sourcemap_comment(response.text)
+                if sourcemap_comment:
+                    sourcemap_url = urljoin(script_url, sourcemap_comment)
+                    if check_url_exists(sourcemap_url, proxy):
+                        sourcemaps.append(
+                            {
+                                "url": sourcemap_url,
+                                "method": "comment",
+                                "comment": sourcemap_comment,
+                            }
+                        )
+        except Exception as e:
+            logging.error(f"  Error checking script content: {e}")
+
+        # Method 2: Try common source map URL patterns
+        common_sourcemaps = check_common_sourcemap_patterns(script_url, proxy)
+        for sourcemap in common_sourcemaps:
+            if sourcemap not in [s["url"] for s in sourcemaps]:  # Avoid duplicates
+                sourcemaps.append({"url": sourcemap, "method": "pattern"})
+
+        results[script_url] = sourcemaps
+
+    return results
+
+
+async def check_single_script_async(session, script_url, proxy=None):
+    """
+    Async version of checking a single script for sourcemaps.
+    """
+    logging.info(f"Checking: {script_url}")
+    sourcemaps = []
+
+    # Method 1: Check for source map comment in script content
+    try:
+        # Configure proxy for this request if provided
+        request_kwargs = {"timeout": aiohttp.ClientTimeout(total=10)}
+        if proxy:
+            request_kwargs["proxy"] = proxy
+
+        async with session.get(script_url, **request_kwargs) as response:
+            if response.status == 200:
+                content = await response.text()
+                sourcemap_comment = find_sourcemap_comment(content)
+                if sourcemap_comment:
+                    sourcemap_url = urljoin(script_url, sourcemap_comment)
+                    if await check_url_exists_async(session, sourcemap_url, proxy):
+                        sourcemaps.append(
+                            {
+                                "url": sourcemap_url,
+                                "method": "comment",
+                                "comment": sourcemap_comment,
+                            }
+                        )
+    except Exception as e:
+        logging.error(f"  Error checking script content: {e}")
+
+    # Method 2: Try common source map URL patterns
+    common_sourcemaps = await check_common_sourcemap_patterns_async(
+        session, script_url, proxy
+    )
+    for sourcemap in common_sourcemaps:
+        if sourcemap not in [s["url"] for s in sourcemaps]:
+            sourcemaps.append({"url": sourcemap, "method": "pattern"})
+
+    return sourcemaps
+
+
+async def check_common_sourcemap_patterns_async(session, script_url, proxy=None):
+    """
+    Async version of checking common sourcemap patterns.
+    """
+    parsed_url = urlparse(script_url)
+    path = parsed_url.path
+    base_path = path.rsplit(".", 1)[0] if "." in path else path
+
+    patterns = [
+        f"{base_path}.map",
+        f"{base_path}.js.map",
+        f"{base_path}.css.map",
+        f"{path}.map",
+        f"{path}.js.map",
+        f"{path}.css.map",
+    ]
+
+    accessible_sourcemaps = []
+    for pattern in patterns:
+        sourcemap_url = f"{parsed_url.scheme}://{parsed_url.netloc}{pattern}"
+        if await check_url_exists_async(session, sourcemap_url, proxy):
+            accessible_sourcemaps.append(sourcemap_url)
+
+    return accessible_sourcemaps
+
+
+async def check_url_exists_async(session, url, proxy=None):
+    """
+    Async version of checking if a URL exists and is a valid sourcemap.
+    """
+    try:
+        # Configure proxy for this request if provided
+        request_kwargs = {"timeout": aiohttp.ClientTimeout(total=5)}
+        if proxy:
+            request_kwargs["proxy"] = proxy
+
+        async with session.get(url, **request_kwargs) as response:
+            if response.status == 200:
+                data = await response.json()
+                return (
+                    isinstance(data, dict)
+                    and "version" in data
+                    and "file" in data
+                    and "mappings" in data
+                )
+        return False
+    except Exception as e:
+        logging.info(f"Not a source map: {url}: {e}")
+        return False
+
+
+def find_sourcemap_comment(script_content):
+    """
+    Find source map comment in script content.
+
+    Args:
+        script_content (str): The script content to search
+
+    Returns:
+        str or None: Source map URL from comment if found
+    """
+    patterns = [
+        r"//# sourceMappingURL=([^\s]+)",
+        r"//@ sourceMappingURL=([^\s]+)",
+        r"/\*# sourceMappingURL=([^\s]+) \*/",
+        r"/\*@ sourceMappingURL=([^\s]+) @\*/",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, script_content)
+        if match:
+            return match.group(1)
+
+    return None
+
+
+def check_common_sourcemap_patterns(script_url, proxy=None):
+    """
+    Check common source map URL patterns for a script.
+
+    Args:
+        script_url (str): The script URL
+        proxy (str, optional): Proxy URL (e.g., 'http://proxy:port' or 'socks5://proxy:port')
+
+    Returns:
+        list: List of accessible source map URLs
+    """
+    parsed_url = urlparse(script_url)
+    path = parsed_url.path
+    base_path = path.rsplit(".", 1)[0] if "." in path else path
+
+    # Common source map patterns
+    patterns = [
+        f"{base_path}.map",
+        f"{base_path}.js.map",
+        f"{base_path}.css.map",
+        f"{path}.map",
+        f"{path}.js.map",
+        f"{path}.css.map",
+    ]
+
+    accessible_sourcemaps = []
+    for pattern in patterns:
+        sourcemap_url = f"{parsed_url.scheme}://{parsed_url.netloc}{pattern}"
+        if check_url_exists(sourcemap_url, proxy):
+            accessible_sourcemaps.append(sourcemap_url)
+
+    return accessible_sourcemaps
+
+
+def check_url_exists(url, proxy=None):
+    """
+    Check if a URL exists by making a GET request and validating it's a source map.
+
+    Args:
+        url (str): URL to check
+        proxy (str, optional): Proxy URL (e.g., 'http://proxy:port' or 'socks5://proxy:port')
+
+    Returns:
+        bool: True if URL exists and is a valid source map
+    """
+    try:
+        # Configure proxy if provided
+        proxies = None
+        if proxy:
+            proxies = {"http": proxy, "https": proxy}
+
+        response = requests.get(url, timeout=5, proxies=proxies)
+        data = response.json()
+        if not (
+            isinstance(data, dict)
+            and "version" in data
+            and "file" in data
+            and "mappings" in data
+        ):
+            return False
+        return True
+    except Exception as e:
+        logging.info(f"Not a source map: {url}: {e}")
+        return False
 
 
 def check_and_clean_output_directory(output_dir):
@@ -178,46 +519,122 @@ def analyze_sourcemap(sourcemap_json):
 
 
 def main():
+    # Setup logging first
+    setup_logging()
     parser = argparse.ArgumentParser(
         description="Download a sourcemap file from a URL and extract all source code."
     )
     parser.add_argument("url", help="URL to the sourcemap file")
+
     parser.add_argument(
-        "--output",
-        "-o",
-        default="extracted_sources",
-        help="Output directory for extracted sources (default: extracted_sources)",
+        "--proxy",
+        "-p",
+        help="Proxy URL (e.g., 'http://proxy:port' or 'socks5://proxy:port')",
     )
-    parser.add_argument(
-        "--analyze",
-        "-a",
+    # Require a output folder directory where files will be extracted to . Only required if --extract_sources is used
+    # Argument group for extract_sources
+    extract_sources_group = parser.add_argument_group("Extract Sources")
+    extract_sources_group.add_argument(
+        "--extract_sources",
+        "-e",
         action="store_true",
-        help="Analyze the sourcemap structure without extracting",
+        help="Extract the source files from the sourcemap",
+    )
+    extract_sources_group.add_argument(
+        "--output_dir",
+        "-o",
+        help="Output directory where files will be extracted to",
     )
 
     args = parser.parse_args()
+    if args.extract_sources:
+        if not args.output_dir:
+            logging.info("Output directory is required when using --extract_sources")
+            return
 
-    try:
-        print(f"Downloading sourcemap from: {args.url}")
-        sourcemap_json = download_sourcemap(args.url)
+    # If output_dir , check if it exists and is empty. If not, ask user for confirmation to delete it.
+    if args.output_dir:
+        if not os.path.exists(args.output_dir):
+            os.makedirs(args.output_dir)
+        else:
+            if os.listdir(args.output_dir):
+                logging.info("Output directory is not empty")
+                response = input(
+                    "Do you want to continue and delete existing contents? (y/N): "
+                )
+                if response in ["y", "yes"]:
+                    shutil.rmtree(args.output_dir)
+                    os.makedirs(args.output_dir)
+                else:
+                    logging.info("Operation cancelled by user.")
+                    return
 
-        # Analyze the sourcemap
-        analyze_sourcemap(sourcemap_json)
+    url = args.url.strip()
+    proxy = args.proxy
+    output_dir = args.output_dir
+    if not url:
+        logging.info("No URL provided")
+        return
 
-        if not args.analyze:
-            # Check and clean output directory if needed
-            if not check_and_clean_output_directory(args.output):
-                return
+    if proxy:
+        logging.info(f"Using proxy: {proxy}")
 
-            # Extract the source files
-            extract_source_files(sourcemap_json, args.output)
+    logging.info(f"Checking {url} for script tags...")
+    # Get script tags from head
+    scripts = get_script_tags(url, proxy)
 
-    except requests.exceptions.RequestException as e:
-        print(f"Error downloading sourcemap: {e}")
-    except json.JSONDecodeError as e:
-        print(f"Error parsing sourcemap JSON: {e}")
-    except Exception as e:
-        print(f"Unexpected error: {e}")
+    if not scripts:
+        logging.info("No script tags with src attributes from this domain found")
+        return
+
+    logging.info(f"Found {len(scripts)} script tag(s):")
+    for i, script in enumerate(scripts, 1):
+        logging.info(f"{script['src']}")
+
+    logging.info("Checking for source map files...")
+
+    # Check for source maps using async
+    script_urls = [script["src"] for script in scripts]
+    sourcemap_results = asyncio.run(check_for_sourcemaps(script_urls, proxy))
+
+    # Summary
+    logging.info("Summary:")
+    total_sourcemaps = sum(len(sourcemaps) for sourcemaps in sourcemap_results.values())
+    logging.info(f"Scripts checked: {len(scripts)}")
+    logging.info(f"Source maps found: {total_sourcemaps}")
+
+    if total_sourcemaps > 0:
+        logging.info("All source maps found:")
+        for script_url, sourcemaps in sourcemap_results.items():
+            if sourcemaps:
+                for sourcemap in sourcemaps:
+                    print(f"{sourcemap['url']}")
+                    if args.extract_sources:
+                        try:
+                            output_dir = (
+                                f"{args.output_dir}/{script_url.split('/')[-1]}"
+                            )
+                            logging.info(
+                                f"Downloading sourcemap from: {sourcemap['url']}"
+                            )
+                            sourcemap_json = download_sourcemap(sourcemap["url"])
+
+                            # Analyze the sourcemap
+                            analyze_sourcemap(sourcemap_json)
+
+                            # Check and clean output directory if needed
+                            if not check_and_clean_output_directory(output_dir):
+                                continue
+
+                            # Extract the source files
+                            extract_source_files(sourcemap_json, output_dir)
+
+                        except requests.exceptions.RequestException as e:
+                            logging.info(f"Error downloading sourcemap: {e}")
+                        except json.JSONDecodeError as e:
+                            logging.info(f"Error parsing sourcemap JSON: {e}")
+                        except Exception as e:
+                            logging.error(f"Unexpected error: {e}")
 
 
 if __name__ == "__main__":
