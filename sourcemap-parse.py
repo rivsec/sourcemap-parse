@@ -1,5 +1,6 @@
 # Accept URL from user pointing to a sourcemap file and download it temporary
 import argparse
+from tkinter import Y
 import requests
 import tempfile
 import os
@@ -611,9 +612,12 @@ def main():
                     print(f"{sourcemap['url']}")
                     if args.extract_sources:
                         try:
-                            output_dir = (
-                                f"{args.output_dir}/{script_url.split('/')[-1]}"
-                            )
+                            netloc = urlparse(script_url).netloc
+                            # Check if output_dir is a valid directory with netloc inside it , otherwise create it
+                            if not os.path.exists(f"{args.output_dir}/{netloc}"):
+                                os.makedirs(f"{args.output_dir}/{netloc}")
+
+                            output_dir = f"{args.output_dir}/{netloc}/{script_url.split('/')[-1]}"
                             logging.info(
                                 f"Downloading sourcemap from: {sourcemap['url']}"
                             )
