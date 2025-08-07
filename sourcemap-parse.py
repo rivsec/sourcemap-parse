@@ -246,13 +246,19 @@ async def check_url_exists_async(session, url, proxy=None):
 
         async with session.get(url, **request_kwargs) as response:
             if response.status == 200:
-                data = await response.json()
-                return (
-                    isinstance(data, dict)
-                    and "version" in data
-                    and "file" in data
-                    and "mappings" in data
-                )
+                # Force JSON processing by reading as text first
+                try:
+                    text_content = await response.text()
+                    data = json.loads(text_content)
+                    return (
+                        isinstance(data, dict)
+                        and "version" in data
+                        and "file" in data
+                        and "mappings" in data
+                    )
+                except json.JSONDecodeError as json_error:
+                    logging.info(f"Failed to parse JSON from {url}: {json_error}")
+                    return False
         return False
     except Exception as e:
         logging.info(f"Not a source map: {url}: {e}")
@@ -559,16 +565,7 @@ def main():
             os.makedirs(args.output_dir)
         else:
             if os.listdir(args.output_dir):
-                logging.info("Output directory is not empty")
-                response = input(
-                    "Do you want to continue and delete existing contents? (y/N): "
-                )
-                if response in ["y", "yes"]:
-                    shutil.rmtree(args.output_dir)
-                    os.makedirs(args.output_dir)
-                else:
-                    logging.info("Operation cancelled by user.")
-                    return
+                logging.info("Output directory is not empty...")
 
     url = args.url.strip()
     proxy = args.proxy
@@ -612,12 +609,17 @@ def main():
                     print(f"{sourcemap['url']}")
                     if args.extract_sources:
                         try:
-                            netloc = urlparse(script_url).netloc
-                            # Check if output_dir is a valid directory with netloc inside it , otherwise create it
-                            if not os.path.exists(f"{args.output_dir}/{netloc}"):
-                                os.makedirs(f"{args.output_dir}/{netloc}")
+                            url_parsed = urlparse(script_url)
+                            hostname = url_parsed.hostname
 
-                            output_dir = f"{args.output_dir}/{netloc}/{script_url.split('/')[-1]}"
+                            output_dir = f"{args.output_dir}/{hostname}/{url_parsed.path.split('/')[-1]}"
+                            # Check and clean output directory if needed
+                            if not check_and_clean_output_directory(output_dir):
+                                continue
+                            # Check if output_dir is a valid directory with netloc inside it , otherwise create it
+                            if not os.path.exists(output_dir):
+                                os.makedirs(output_dir)
+
                             logging.info(
                                 f"Downloading sourcemap from: {sourcemap['url']}"
                             )
@@ -625,10 +627,6 @@ def main():
 
                             # Analyze the sourcemap
                             analyze_sourcemap(sourcemap_json)
-
-                            # Check and clean output directory if needed
-                            if not check_and_clean_output_directory(output_dir):
-                                continue
 
                             # Extract the source files
                             extract_source_files(sourcemap_json, output_dir)
