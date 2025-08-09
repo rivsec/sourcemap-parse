@@ -1,6 +1,5 @@
 # Accept URL from user pointing to a sourcemap file and download it temporary
 import argparse
-from tkinter import Y
 import requests
 import tempfile
 import os
@@ -8,6 +7,7 @@ import json
 import pathlib
 import shutil
 import logging
+import sys
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import re
@@ -78,8 +78,6 @@ def get_script_tags(url, proxy=None):
 
 
 def setup_logging():
-    import sys
-
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
@@ -613,6 +611,8 @@ def main():
                             hostname = url_parsed.hostname
 
                             output_dir = f"{args.output_dir}/{hostname}/{url_parsed.path.split('/')[-1]}"
+                            # Replace .. with . in output_dir
+                            output_dir = output_dir.replace("..", ".")
                             # Check and clean output directory if needed
                             if not check_and_clean_output_directory(output_dir):
                                 continue
