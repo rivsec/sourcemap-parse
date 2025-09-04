@@ -37,7 +37,9 @@ def get_script_tags(url, proxy=None):
         if proxy:
             proxies = {"http": proxy, "https": proxy}
 
-        response = requests.get(url, headers=headers, timeout=10, proxies=proxies)
+        response = requests.get(
+            url, headers=headers, timeout=10, proxies=proxies, verify=False
+        )
         response.raise_for_status()
 
         # Parse HTML with BeautifulSoup
@@ -98,7 +100,17 @@ async def check_for_sourcemaps(script_urls, proxy=None):
         )
         return check_for_sourcemaps_sync(script_urls, proxy)
 
-    async with aiohttp.ClientSession() as session:
+    # Create SSL context that doesn't verify certificates
+    import ssl
+
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+
+    # Create connector with SSL context
+    connector = aiohttp.TCPConnector(ssl=ssl_context)
+
+    async with aiohttp.ClientSession(connector=connector) as session:
         # Create tasks for all script URLs
         tasks = [
             check_single_script_async(session, script_url, proxy)
@@ -136,7 +148,9 @@ def check_for_sourcemaps_sync(script_urls, proxy=None):
 
         # Method 1: Check for source map comment in script content
         try:
-            response = requests.get(script_url, timeout=10, proxies=proxies)
+            response = requests.get(
+                script_url, timeout=10, proxies=proxies, verify=False
+            )
             if response.status_code == 200:
                 # Look for source map comment
                 sourcemap_comment = find_sourcemap_comment(response.text)
@@ -184,7 +198,7 @@ async def check_single_script_async(session, script_url, proxy=None):
                 sourcemap_comment = find_sourcemap_comment(content)
                 if sourcemap_comment:
                     sourcemap_url = urljoin(script_url, sourcemap_comment)
-                    if await check_url_exists_async(session, sourcemap_url, proxy):
+                    if await check_if_exists_and_is_map(session, sourcemap_url, proxy):
                         sourcemaps.append(
                             {
                                 "url": sourcemap_url,
@@ -226,13 +240,13 @@ async def check_common_sourcemap_patterns_async(session, script_url, proxy=None)
     accessible_sourcemaps = []
     for pattern in patterns:
         sourcemap_url = f"{parsed_url.scheme}://{parsed_url.netloc}{pattern}"
-        if await check_url_exists_async(session, sourcemap_url, proxy):
+        if await check_if_exists_and_is_map(session, sourcemap_url, proxy):
             accessible_sourcemaps.append(sourcemap_url)
 
     return accessible_sourcemaps
 
 
-async def check_url_exists_async(session, url, proxy=None):
+async def check_if_exists_and_is_map(session, url, proxy=None):
     """
     Async version of checking if a URL exists and is a valid sourcemap.
     """
@@ -255,11 +269,11 @@ async def check_url_exists_async(session, url, proxy=None):
                         and "mappings" in data
                     )
                 except json.JSONDecodeError as json_error:
-                    logging.info(f"Failed to parse JSON from {url}: {json_error}")
+                    logging.debug(f"Failed to parse JSON from {url}: {json_error}")
                     return False
         return False
     except Exception as e:
-        logging.info(f"Not a source map: {url}: {e}")
+        logging.debug(f"Not a source map: {url}: {e}")
         return False
 
 
@@ -339,7 +353,7 @@ def check_url_exists(url, proxy=None):
         if proxy:
             proxies = {"http": proxy, "https": proxy}
 
-        response = requests.get(url, timeout=5, proxies=proxies)
+        response = requests.get(url, timeout=5, proxies=proxies, verify=False)
         data = response.json()
         if not (
             isinstance(data, dict)
@@ -387,7 +401,7 @@ def check_and_clean_output_directory(output_dir):
 def download_sourcemap(url):
     """Download sourcemap from URL and return as JSON"""
     with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
-        response = requests.get(url)
+        response = requests.get(url, verify=False)
         response.raise_for_status()
         tmp_file.write(response.content)
         temp_filename = tmp_file.name
@@ -399,6 +413,22 @@ def download_sourcemap(url):
     # Delete the temporary file
     os.remove(temp_filename)
     return sourcemap_json
+
+
+def load_sourcemap_from_file(file_path):
+    """Load sourcemap from local file and return as JSON"""
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            sourcemap_json = json.load(f)
+        return sourcemap_json
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Sourcemap file not found: {file_path}")
+    except json.JSONDecodeError as e:
+        raise json.JSONDecodeError(
+            f"Invalid JSON in sourcemap file {file_path}: {e}", e.doc, e.pos
+        )
+    except Exception as e:
+        raise Exception(f"Error reading sourcemap file {file_path}: {e}")
 
 
 def extract_source_files(sourcemap_json, output_dir="extracted_sources"):
@@ -414,10 +444,17 @@ def extract_source_files(sourcemap_json, output_dir="extracted_sources"):
 
     if not sources:
         print("No sources found in sourcemap")
-        return
+        # The sources could be available directly by request. Attempt to get them from the server directly
+        for source in sources:
+            try:
+                response = requests.get(source, verify=False)
+                response.raise_for_status()
+                sources_content.append(response.text)
+            except Exception as e:
+                print(f"Error fetching source {source}: {e}")
 
     if not sources_content:
-        print("No source content found in sourcemap")
+        print("No source content found in sourcemap!")
         return
 
     # Ensure we have matching arrays
@@ -448,13 +485,25 @@ def extract_source_files(sourcemap_json, output_dir="extracted_sources"):
         if clean_path.startswith("/"):
             clean_path = clean_path[1:]
 
-        # Sanitize the path to prevent directory traversal
+        # Sanitize the path to prevent directory traversal and invalid characters
         # Split the path and filter out any '..' or '.' components
         path_parts = clean_path.split("/")
         sanitized_parts = []
         for part in path_parts:
             if part not in ["..", "."] and part.strip():
-                sanitized_parts.append(part)
+                # Remove or replace Windows-invalid characters
+                sanitized_part = part
+                # Replace invalid characters with underscores
+                invalid_chars = '<>:"|?*\\'
+                for char in invalid_chars:
+                    sanitized_part = sanitized_part.replace(char, "_")
+                # Remove any remaining control characters
+                sanitized_part = "".join(
+                    char for char in sanitized_part if ord(char) >= 32
+                )
+                # Ensure the part is not empty after sanitization
+                if sanitized_part.strip():
+                    sanitized_parts.append(sanitized_part)
 
         # Reconstruct the sanitized path
         clean_path = "/".join(sanitized_parts)
@@ -462,8 +511,26 @@ def extract_source_files(sourcemap_json, output_dir="extracted_sources"):
         # Create the full file path
         file_path = output_path / clean_path
 
+        # Check if path is too long for Windows (260 character limit)
+        if len(str(file_path)) > 250:  # Leave some buffer
+            print(f"Path too long, using fallback filename for: {clean_path}")
+            fallback_filename = f"source_{i:04d}.js"
+            file_path = output_path / fallback_filename
+
         # Ensure the directory exists
-        file_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            print(f"Error creating directory for {file_path}: {e}")
+            # Try to create a sanitized filename as fallback
+            try:
+                # Create a simple filename based on the index
+                fallback_filename = f"source_{i:04d}.js"
+                file_path = output_path / fallback_filename
+                print(f"Using fallback filename: {fallback_filename}")
+            except Exception as fallback_error:
+                print(f"Error creating fallback filename: {fallback_error}")
+                continue
 
         # Write the source content to file
         try:
@@ -527,9 +594,19 @@ def main():
     # Setup logging first
     setup_logging()
     parser = argparse.ArgumentParser(
-        description="Download a sourcemap file from a URL and extract all source code."
+        description="Extract source code from sourcemap files. Can either scan a webpage for sourcemaps or process a local sourcemap file directly."
     )
-    parser.add_argument("url", help="URL to the sourcemap file")
+    parser.add_argument(
+        "url",
+        nargs="?",
+        help="URL to the sourcemap file or webpage to scan for sourcemaps",
+    )
+
+    parser.add_argument(
+        "--map_file",
+        "-m",
+        help="Path to a local sourcemap file to extract from (alternative to URL)",
+    )
 
     parser.add_argument(
         "--proxy",
@@ -552,12 +629,24 @@ def main():
     )
 
     args = parser.parse_args()
-    if args.extract_sources:
-        if not args.output_dir:
-            logging.info("Output directory is required when using --extract_sources")
-            return
 
-    # If output_dir , check if it exists and is empty. If not, ask user for confirmation to delete it.
+    # Validate arguments
+    if not args.url and not args.map_file:
+        logging.error("Either URL or --map_file must be provided")
+        parser.print_help()
+        return
+
+    if args.url and args.map_file:
+        logging.error("Cannot use both URL and --map_file. Please choose one.")
+        parser.print_help()
+        return
+
+    if args.extract_sources and not args.output_dir:
+        logging.error("Output directory is required when using --extract_sources")
+        parser.print_help()
+        return
+
+    # Handle output directory setup
     if args.output_dir:
         if not os.path.exists(args.output_dir):
             os.makedirs(args.output_dir)
@@ -565,78 +654,104 @@ def main():
             if os.listdir(args.output_dir):
                 logging.info("Output directory is not empty...")
 
-    url = args.url.strip()
     proxy = args.proxy
     output_dir = args.output_dir
-    if not url:
-        logging.info("No URL provided")
-        return
 
     if proxy:
         logging.info(f"Using proxy: {proxy}")
 
-    logging.info(f"Checking {url} for script tags...")
-    # Get script tags from head
-    scripts = get_script_tags(url, proxy)
+    # Handle local sourcemap file
+    if args.map_file:
+        try:
+            logging.info(f"Loading sourcemap from local file: {args.map_file}")
+            sourcemap_json = load_sourcemap_from_file(args.map_file)
 
-    if not scripts:
-        logging.info("No script tags with src attributes from this domain found")
-        return
+            # Analyze the sourcemap
+            analyze_sourcemap(sourcemap_json)
 
-    logging.info(f"Found {len(scripts)} script tag(s):")
-    for i, script in enumerate(scripts, 1):
-        logging.info(f"{script['src']}")
+            if args.extract_sources:
+                # Check and clean output directory if needed
+                if not check_and_clean_output_directory(output_dir):
+                    return
 
-    logging.info("Checking for source map files...")
+                # Extract the source files
+                extract_source_files(sourcemap_json, output_dir)
 
-    # Check for source maps using async
-    script_urls = [script["src"] for script in scripts]
-    sourcemap_results = asyncio.run(check_for_sourcemaps(script_urls, proxy))
+        except Exception as e:
+            logging.error(f"Error processing sourcemap file: {e}")
+            return
 
-    # Summary
-    logging.info("Summary:")
-    total_sourcemaps = sum(len(sourcemaps) for sourcemaps in sourcemap_results.values())
-    logging.info(f"Scripts checked: {len(scripts)}")
-    logging.info(f"Source maps found: {total_sourcemaps}")
+    # Handle URL-based sourcemap discovery
+    else:
+        url = args.url.strip()
+        if not url:
+            logging.error("No URL provided")
+            return
 
-    if total_sourcemaps > 0:
-        logging.info("All source maps found:")
-        for script_url, sourcemaps in sourcemap_results.items():
-            if sourcemaps:
-                for sourcemap in sourcemaps:
-                    print(f"{sourcemap['url']}")
-                    if args.extract_sources:
-                        try:
-                            url_parsed = urlparse(script_url)
-                            hostname = url_parsed.hostname
+        logging.info(f"Checking {url} for script tags...")
+        # Get script tags from head
+        scripts = get_script_tags(url, proxy)
 
-                            output_dir = f"{args.output_dir}/{hostname}/{url_parsed.path.split('/')[-1]}"
-                            # Replace .. with . in output_dir
-                            output_dir = output_dir.replace("..", ".")
-                            # Check and clean output directory if needed
-                            if not check_and_clean_output_directory(output_dir):
-                                continue
-                            # Check if output_dir is a valid directory with netloc inside it , otherwise create it
-                            if not os.path.exists(output_dir):
-                                os.makedirs(output_dir)
+        if not scripts:
+            logging.info("No script tags with src attributes from this domain found")
+            return
 
-                            logging.info(
-                                f"Downloading sourcemap from: {sourcemap['url']}"
-                            )
-                            sourcemap_json = download_sourcemap(sourcemap["url"])
+        logging.info(f"Found {len(scripts)} script tag(s):")
+        for i, script in enumerate(scripts, 1):
+            logging.info(f"{script['src']}")
 
-                            # Analyze the sourcemap
-                            analyze_sourcemap(sourcemap_json)
+        logging.info("Checking for source map files...")
 
-                            # Extract the source files
-                            extract_source_files(sourcemap_json, output_dir)
+        # Check for source maps using async
+        script_urls = [script["src"] for script in scripts]
+        sourcemap_results = asyncio.run(check_for_sourcemaps(script_urls, proxy))
 
-                        except requests.exceptions.RequestException as e:
-                            logging.info(f"Error downloading sourcemap: {e}")
-                        except json.JSONDecodeError as e:
-                            logging.info(f"Error parsing sourcemap JSON: {e}")
-                        except Exception as e:
-                            logging.error(f"Unexpected error: {e}")
+        # Summary
+        logging.info("Summary:")
+        total_sourcemaps = sum(
+            len(sourcemaps) for sourcemaps in sourcemap_results.values()
+        )
+        logging.info(f"Scripts checked: {len(scripts)}")
+        logging.info(f"Source maps found: {total_sourcemaps}")
+
+        if total_sourcemaps > 0:
+            logging.info("All source maps found:")
+            for script_url, sourcemaps in sourcemap_results.items():
+                if sourcemaps:
+                    for sourcemap in sourcemaps:
+                        print(f"{sourcemap['url']}")
+                        if args.extract_sources:
+                            try:
+                                url_parsed = urlparse(script_url)
+                                hostname = url_parsed.hostname
+
+                                output_dir = f"{args.output_dir}/{hostname}/{url_parsed.path.split('/')[-1]}"
+                                # Replace .. with . in output_dir
+                                output_dir = output_dir.replace("..", ".")
+                                # Check and clean output directory if needed
+                                if not check_and_clean_output_directory(output_dir):
+                                    continue
+                                # Check if output_dir is a valid directory with netloc inside it , otherwise create it
+                                if not os.path.exists(output_dir):
+                                    os.makedirs(output_dir)
+
+                                logging.info(
+                                    f"Downloading sourcemap from: {sourcemap['url']}"
+                                )
+                                sourcemap_json = download_sourcemap(sourcemap["url"])
+
+                                # Analyze the sourcemap
+                                analyze_sourcemap(sourcemap_json)
+
+                                # Extract the source files
+                                extract_source_files(sourcemap_json, output_dir)
+
+                            except requests.exceptions.RequestException as e:
+                                logging.info(f"Error downloading sourcemap: {e}")
+                            except json.JSONDecodeError as e:
+                                logging.info(f"Error parsing sourcemap JSON: {e}")
+                            except Exception as e:
+                                logging.error(f"Unexpected error: {e}")
 
 
 if __name__ == "__main__":
