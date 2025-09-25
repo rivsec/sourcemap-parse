@@ -79,9 +79,9 @@ def get_script_tags(url, proxy=None):
         return []
 
 
-def setup_logging():
+def setup_logging(log_level):
     logging.basicConfig(
-        level=logging.INFO,
+        level=log_level,
         format="%(asctime)s - %(levelname)s - %(message)s",
         handlers=[logging.StreamHandler(sys.stderr)],
     )
@@ -591,8 +591,7 @@ def analyze_sourcemap(sourcemap_json):
 
 
 def main():
-    # Setup logging first
-    setup_logging()
+    # Parse arguments first
     parser = argparse.ArgumentParser(
         description="Extract source code from sourcemap files. Can either scan a webpage for sourcemaps or process a local sourcemap file directly."
     )
@@ -609,10 +608,26 @@ def main():
     )
 
     parser.add_argument(
+        "--json",
+        "-j",
+        action="store_true",
+        help="Output the sourcemap as JSON array",
+    )
+    ## Add argument to set log level
+    parser.add_argument(
+        "--log_level",
+        "-l",
+        help="Set the log level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+    )
+
+    parser.add_argument(
         "--proxy",
         "-p",
         help="Proxy URL (e.g., 'http://proxy:port' or 'socks5://proxy:port')",
     )
+
     # Require a output folder directory where files will be extracted to . Only required if --extract_sources is used
     # Argument group for extract_sources
     extract_sources_group = parser.add_argument_group("Extract Sources")
@@ -629,6 +644,9 @@ def main():
     )
 
     args = parser.parse_args()
+
+     # Set log level
+    setup_logging(args.log_level)
 
     # Validate arguments
     if not args.url and not args.map_file:
@@ -714,12 +732,16 @@ def main():
         logging.info(f"Scripts checked: {len(scripts)}")
         logging.info(f"Source maps found: {total_sourcemaps}")
 
+        sourcemap_json_array = []
         if total_sourcemaps > 0:
             logging.info("All source maps found:")
             for script_url, sourcemaps in sourcemap_results.items():
                 if sourcemaps:
                     for sourcemap in sourcemaps:
-                        print(f"{sourcemap['url']}")
+                        if args.json:
+                            sourcemap_json_array.append(sourcemap)
+                        else:
+                            print(f"{sourcemap['url']}")
                         if args.extract_sources:
                             try:
                                 url_parsed = urlparse(script_url)
@@ -752,6 +774,8 @@ def main():
                                 logging.info(f"Error parsing sourcemap JSON: {e}")
                             except Exception as e:
                                 logging.error(f"Unexpected error: {e}")
+        if args.json and len(sourcemap_json_array) > 0:
+            print(json.dumps(sourcemap_json_array, indent=4))
 
 
 if __name__ == "__main__":
