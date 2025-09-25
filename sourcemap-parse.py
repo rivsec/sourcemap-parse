@@ -13,6 +13,10 @@ from urllib.parse import urljoin, urlparse
 import re
 import asyncio
 import aiohttp
+import urllib3
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 def get_script_tags(url, proxy=None):
