@@ -79,9 +79,9 @@ def get_script_tags(url, proxy=None):
         return []
 
 
-def setup_logging():
+def setup_logging(log_level):
     logging.basicConfig(
-        level=logging.INFO,
+        level=log_level,
         format="%(asctime)s - %(levelname)s - %(message)s",
         handlers=[logging.StreamHandler(sys.stderr)],
     )
@@ -591,8 +591,7 @@ def analyze_sourcemap(sourcemap_json):
 
 
 def main():
-    # Setup logging first
-    setup_logging()
+    # Parse arguments first
     parser = argparse.ArgumentParser(
         description="Extract source code from sourcemap files. Can either scan a webpage for sourcemaps or process a local sourcemap file directly."
     )
@@ -613,6 +612,10 @@ def main():
         "-p",
         help="Proxy URL (e.g., 'http://proxy:port' or 'socks5://proxy:port')",
     )
+
+    # Set log level
+    setup_logging(parser.parse_args().log_level)
+
     # Require a output folder directory where files will be extracted to . Only required if --extract_sources is used
     # Argument group for extract_sources
     extract_sources_group = parser.add_argument_group("Extract Sources")
