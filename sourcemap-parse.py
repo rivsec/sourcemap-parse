@@ -628,9 +628,6 @@ def main():
         help="Proxy URL (e.g., 'http://proxy:port' or 'socks5://proxy:port')",
     )
 
-    # Set log level
-    setup_logging(parser.parse_args().log_level)
-
     # Require a output folder directory where files will be extracted to . Only required if --extract_sources is used
     # Argument group for extract_sources
     extract_sources_group = parser.add_argument_group("Extract Sources")
@@ -647,6 +644,9 @@ def main():
     )
 
     args = parser.parse_args()
+
+     # Set log level
+    setup_logging(args.log_level)
 
     # Validate arguments
     if not args.url and not args.map_file:
