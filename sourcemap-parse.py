@@ -19,6 +19,28 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
+def is_same_domain(original_url, redirect_url):
+    """
+    Check if a redirect URL is from the same domain as the original URL.
+
+    Args:
+        original_url (str): The original URL
+        redirect_url (str): The redirect URL to check
+
+    Returns:
+        bool: True if same domain, False if different domain
+    """
+    try:
+        original_parsed = urlparse(original_url)
+        redirect_parsed = urlparse(redirect_url)
+
+        # Compare netloc (domain + port)
+        return original_parsed.netloc == redirect_parsed.netloc
+    except Exception:
+        # If parsing fails, be conservative and reject the redirect
+        return False
+
+
 def get_script_tags(url, proxy=None):
     """
     Get all script tags from the <head> element of a webpage.
@@ -45,6 +67,13 @@ def get_script_tags(url, proxy=None):
             url, headers=headers, timeout=10, proxies=proxies, verify=False
         )
         response.raise_for_status()
+
+        # Check if the final URL after redirects is on the same domain
+        if not is_same_domain(url, response.url):
+            logging.warning(
+                f"Redirect from {url} to {response.url} goes off-domain, skipping source map processing"
+            )
+            return []
 
         # Parse HTML with BeautifulSoup
         soup = BeautifulSoup(response.text, "html.parser")
@@ -156,6 +185,13 @@ def check_for_sourcemaps_sync(script_urls, proxy=None):
                 script_url, timeout=10, proxies=proxies, verify=False
             )
             if response.status_code == 200:
+                # Check if the final URL after redirects is on the same domain
+                if not is_same_domain(script_url, response.url):
+                    logging.warning(
+                        f"Redirect from {script_url} to {response.url} goes off-domain, skipping source map processing"
+                    )
+                    results[script_url] = []
+                    continue
                 # Look for source map comment
                 sourcemap_comment = find_sourcemap_comment(response.text)
                 if sourcemap_comment:
@@ -198,6 +234,12 @@ async def check_single_script_async(session, script_url, proxy=None):
 
         async with session.get(script_url, **request_kwargs) as response:
             if response.status == 200:
+                # Check if the final URL after redirects is on the same domain
+                if not is_same_domain(script_url, str(response.url)):
+                    logging.warning(
+                        f"Redirect from {script_url} to {response.url} goes off-domain, skipping source map processing"
+                    )
+                    return []
                 content = await response.text()
                 sourcemap_comment = find_sourcemap_comment(content)
                 if sourcemap_comment:
@@ -262,6 +304,12 @@ async def check_if_exists_and_is_map(session, url, proxy=None):
 
         async with session.get(url, **request_kwargs) as response:
             if response.status == 200:
+                # Check if the final URL after redirects is on the same domain
+                if not is_same_domain(url, str(response.url)):
+                    logging.warning(
+                        f"Redirect from {url} to {response.url} goes off-domain, skipping source map processing"
+                    )
+                    return False
                 # Force JSON processing by reading as text first
                 try:
                     text_content = await response.text()
@@ -358,6 +406,12 @@ def check_url_exists(url, proxy=None):
             proxies = {"http": proxy, "https": proxy}
 
         response = requests.get(url, timeout=5, proxies=proxies, verify=False)
+        # Check if the final URL after redirects is on the same domain
+        if not is_same_domain(url, response.url):
+            logging.warning(
+                f"Redirect from {url} to {response.url} goes off-domain, skipping source map processing"
+            )
+            return False
         data = response.json()
         if not (
             isinstance(data, dict)
@@ -407,6 +461,11 @@ def download_sourcemap(url):
     with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
         response = requests.get(url, verify=False)
         response.raise_for_status()
+        # Check if the final URL after redirects is on the same domain
+        if not is_same_domain(url, response.url):
+            raise Exception(
+                f"Redirect from {url} to {response.url} goes off-domain, refusing to download source map"
+            )
         tmp_file.write(response.content)
         temp_filename = tmp_file.name
 
@@ -453,6 +512,12 @@ def extract_source_files(sourcemap_json, output_dir="extracted_sources"):
             try:
                 response = requests.get(source, verify=False)
                 response.raise_for_status()
+                # Check if the final URL after redirects is on the same domain
+                if not is_same_domain(source, response.url):
+                    print(
+                        f"Warning: Redirect from {source} to {response.url} goes off-domain, skipping source file"
+                    )
+                    continue
                 sources_content.append(response.text)
             except Exception as e:
                 print(f"Error fetching source {source}: {e}")
@@ -649,7 +714,7 @@ def main():
 
     args = parser.parse_args()
 
-     # Set log level
+    # Set log level
     setup_logging(args.log_level)
 
     # Validate arguments
