@@ -34,8 +34,26 @@ def is_same_domain(original_url, redirect_url):
         original_parsed = urlparse(original_url)
         redirect_parsed = urlparse(redirect_url)
 
-        # Compare netloc (domain + port)
-        return original_parsed.netloc == redirect_parsed.netloc
+        # Normalize hostnames (case-insensitive)
+        original_host = (original_parsed.hostname or "").lower()
+        redirect_host = (redirect_parsed.hostname or "").lower()
+
+        # Helper to get the effective port, treating implicit defaults
+        # (e.g. https with no port) the same as explicit ones (e.g. :443)
+        def effective_port(parsed):
+            if parsed.port is not None:
+                return parsed.port
+            if parsed.scheme == "http":
+                return 80
+            if parsed.scheme == "https":
+                return 443
+            return None
+
+        original_port = effective_port(original_parsed)
+        redirect_port = effective_port(redirect_parsed)
+
+        # Same domain if hostname and effective port match
+        return original_host == redirect_host and original_port == redirect_port
     except Exception:
         # If parsing fails, be conservative and reject the redirect
         return False
