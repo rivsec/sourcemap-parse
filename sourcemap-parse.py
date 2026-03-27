@@ -22,11 +22,9 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 def is_same_domain(original_url, redirect_url):
     """
     Check if a redirect URL is from the same domain as the original URL.
-
     Args:
         original_url (str): The original URL
         redirect_url (str): The redirect URL to check
-
     Returns:
         bool: True if same domain, False if different domain
     """
@@ -54,8 +52,9 @@ def is_same_domain(original_url, redirect_url):
 
         # Same domain if hostname and effective port match
         return original_host == redirect_host and original_port == redirect_port
-    except Exception:
+    except Exception as e:
         # If parsing fails, be conservative and reject the redirect
+        logging.warning(f"Error parsing URLs for domain check: {e}")
         return False
 
 
